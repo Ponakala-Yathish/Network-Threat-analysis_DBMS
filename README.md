@@ -1,8 +1,7 @@
 # Network Threat Intelligence & Incident Management Platform
 
-**DBMS Level 3 Experiential Learning Project**
-
-A full-stack web application for automated network threat detection, incident triage, and resolution management. Built with Next.js 14, PostgreSQL, and pgvector for semantic playbook search.
+**DBMS Level 3 Experiential Learning Project**  
+A full-stack web application for automated network threat detection, incident triage, and resolution management.
 
 ## Features
 
@@ -33,7 +32,7 @@ A full-stack web application for automated network threat detection, incident tr
 | Database | PostgreSQL 15+ with pgvector |
 | Auth | jose (JWT), bcryptjs |
 | Validation | Zod |
-| Tables | TanStack Table v9 |
+| Tables | Custom DataTable component |
 | Icons | Lucide React |
 
 ## Prerequisites
@@ -46,39 +45,94 @@ A full-stack web application for automated network threat detection, incident tr
 
 ### 1. Clone and Install
 ```bash
-cd network-threat-intel
+git clone https://github.com/Ponakala-Yathish/Network-Threat-analysis_DBMS.git
+cd Network-Threat-analysis_DBMS
 npm install
 ```
 
 ### 2. Database Setup
-Create a PostgreSQL database and enable pgvector:
-```sql
-CREATE DATABASE threat_intel;
-\c threat_intel;
-CREATE EXTENSION IF NOT EXISTS vector;
+
+**Option A: Docker (Recommended)**
+```bash
+podman run -d \
+  --name threat-intel-db \
+  -p 5433:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=threat_intel \
+  docker.io/pgvector/pgvector:pg16
+```
+
+**Option B: Local PostgreSQL**
+```bash
+# Create database and enable pgvector
+createdb threat_intel
+psql -d threat_intel -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 ### 3. Configure Environment
-Copy `.env.example` to `.env` and update credentials:
 ```bash
 cp .env.example .env
-# Edit .env with your database credentials
+# Edit .env with your database credentials if different from defaults
 ```
 
-### 4. Run Migrations & Seed
-```bash
-npm run db:setup
+Default `.env`:
+```env
+DATABASE_HOST=localhost
+DATABASE_PORT=5433
+DATABASE_NAME=threat_intel
+DATABASE_USER=postgres
+DATABASE_PASSWORD=postgres
+AUTH_SECRET=dev-secret-key-change-in-production-min-32-characters-long
 ```
-This runs migrations, seeds initial data, and generates playbook embeddings.
+
+### 4. Run Database Migrations & Seed
+```bash
+npm run db:migrate
+npm run db:seed
+npm run db:embed
+```
 
 ### 5. Start Development Server
 ```bash
 npm run dev
 ```
 
-Open http://localhost:3000 and login with:
-- **Admin**: `admin` / `admin123`
-- **Analyst**: `analyst` / `analyst123`
+Open http://localhost:3000
+
+## Demo Credentials
+
+| Role | Username | Password | Redirects To |
+|------|----------|----------|--------------|
+| Admin | `admin` | `admin123` | `/admin/dashboard` |
+| Analyst | `analyst` | `analyst123` | `/analyst/incidents` |
+
+## Available Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start development server |
+| `npm run build` | Production build |
+| `npm run start` | Run production build |
+| `npm run lint` | Run ESLint |
+| `npm run db:migrate` | Run database migrations |
+| `npm run db:seed` | Seed initial data |
+| `npm run db:embed` | Generate playbook embeddings |
+| `npm run db:setup` | Run migrate + seed + embed |
+
+## Testing the Brute-Force Trigger
+
+```bash
+# Insert 6 failed logs from same IP (triggers auto-incident creation)
+for i in {1..6}; do
+  PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d threat_intel -c "
+  INSERT INTO Traffic_Logs (attacker_ip, target_id, status) 
+  VALUES ('192.168.1.100', 1, 'Failed');"
+done
+
+# Check auto-created incident
+PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d threat_intel -c "
+SELECT * FROM Incidents WHERE attacker_ip = '192.168.1.100';"
+```
 
 ## Project Structure
 
@@ -86,20 +140,14 @@ Open http://localhost:3000 and login with:
 src/
 ├── app/
 │   ├── api/                 # API routes
-│   │   ├── auth/            # Login/logout
+│   │   ├── auth/            # Login/logout/session
 │   │   ├── incidents/       # Incident CRUD + resolution + playbooks
 │   │   ├── traffic-logs/    # Traffic log ingestion + search
 │   │   ├── assets/          # Network assets
 │   │   ├── admin/           # Admin-only endpoints
 │   │   └── blast-radius/    # Blast radius computation
-│   ├── admin/               # Admin pages
-│   │   ├── dashboard/
-│   │   ├── audit-logs/
-│   │   └── users/
-│   ├── analyst/             # Analyst pages
-│   │   ├── incidents/
-│   │   │   └── [id]/        # Incident detail + resolution
-│   │   └── traffic-logs/
+│   ├── admin/               # Admin pages (dashboard, audit-logs, users)
+│   ├── analyst/             # Analyst pages (incidents, traffic-logs)
 │   └── login/               # Login page
 ├── components/
 │   ├── ui/                  # Reusable UI components
@@ -121,91 +169,17 @@ src/
     └── database.ts          # TypeScript types
 ```
 
-## Database Schema
+## Production Deployment
 
-### Tables
-- **Users**: Authentication & RBAC (Admin/Analyst)
-- **Network_Assets**: Internal infrastructure assets with criticality (1-10)
-- **Traffic_Logs**: Network events (attacker IP, target, status, protocol, port)
-- **Incidents**: Auto-generated from triggers or manual, with blast radius score
-- **Audit_Logs**: Immutable ledger of all analyst actions
-- **Security_Playbooks**: Mitigation guides with pgvector embeddings
-
-### Advanced Features
-```sql
--- Trigger: Brute force detection
-CREATE TRIGGER trigger_detect_brute_force
-    AFTER INSERT ON Traffic_Logs
-    FOR EACH ROW EXECUTE FUNCTION detect_brute_force();
-
--- Function: Blast radius computation
-SELECT * FROM compute_blast_radius(asset_id);
-
--- Function: Atomic incident resolution
-SELECT resolve_incident(incident_id, user_id, notes);
-```
-
-## API Endpoints
-
-### Authentication
-- `POST /api/auth/login` - User login
-- `POST /api/auth/logout` - User logout
-
-### Incidents (Admin, Analyst)
-- `GET /api/incidents` - List with filters & pagination
-- `GET /api/incidents/:id` - Incident detail
-- `POST /api/incidents/:id/resolve` - Resolve incident (transaction)
-- `GET /api/incidents/:id/playbooks` - Semantic playbook search
-
-### Traffic Logs (Admin, Analyst)
-- `GET /api/traffic-logs` - Search with filters
-- `POST /api/traffic-logs` - Ingest log (triggers detection)
-
-### Assets (Admin, Analyst)
-- `GET /api/assets` - List all assets
-- `GET /api/assets?id=:id` - Single asset
-
-### Admin Only
-- `GET /api/admin/stats` - System statistics
-- `GET /api/admin/audit-logs` - Audit log viewer
-- `GET/POST /api/admin/users` - User management
-- `PUT/DELETE /api/admin/users/:id` - Update/delete user
-- `DELETE /api/admin/traffic-logs` - Log rotation
-
-### Blast Radius
-- `GET /api/blast-radius/:assetId` - Compute blast radius
-
-## Development
-
-### Running Scripts
 ```bash
-npm run db:migrate    # Run migrations only
-npm run db:seed       # Seed data only
-npm run db:embed      # Generate playbook embeddings
-npm run db:setup      # Full setup (migrate + seed + embed)
-npm run dev           # Start dev server
-npm run build         # Production build
-npm run lint          # ESLint
+npm run build
+npm run start
 ```
 
-### Adding Playbooks
-1. Insert into Security_Playbooks table
-2. Run `npm run db:embed` to generate vectors
-
-### Testing Trigger
-```sql
--- Insert 6 failed logs from same IP within 10 minutes
-INSERT INTO Traffic_Logs (attacker_ip, target_id, status) 
-VALUES ('192.168.1.100', 1, 'Failed');
--- Repeat 5 more times...
--- Check Incidents table for auto-created incident
-```
-
-## Documentation
-
-- [Project Plan](PROJECT_PLAN.md) - Detailed specifications
-- [Progress Tracker](PROGRESS.md) - Checkpoint-based progress
-- `src/db/schema.sql` - Complete DDL with comments
+Ensure production environment variables are set:
+- `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD`
+- `AUTH_SECRET` (min 32 characters)
+- `NODE_ENV=production`
 
 ## License
 
