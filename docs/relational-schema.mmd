@@ -1,0 +1,62 @@
+flowchart TD
+    %% ==================== TABLES ====================
+    
+    subgraph EMPLOYEE["EMPLOYEE"]
+        E_Fname[Fname]
+        E_Minit[Minit]
+        E_Lname[Lname]
+        E_Ssn[Ssn]:::pk
+        E_Bdate[Bdate]
+        E_Address[Address]
+        E_Sex[Sex]
+        E_Salary[Salary]
+        E_Super_ssn[Super_ssn]:::fk
+        E_Dno[Dno]:::fk
+    end
+
+    subgraph DEPARTMENT["DEPARTMENT"]
+        D_Dname[Dname]
+        D_Dnumber[Dnumber]:::pk
+        D_Mgr_ssn[Mgr_ssn]:::fk
+        D_Mgr_start_date[Mgr_start_date]
+    end
+
+    subgraph DEPT_LOCATIONS["DEPT_LOCATIONS"]
+        DL_Dnumber[Dnumber]:::pk
+        DL_Dlocation[Dlocation]:::pk
+    end
+
+    subgraph PROJECT["PROJECT"]
+        P_Pname[Pname]
+        P_Pnumber[Pnumber]:::pk
+        P_Plocation[Plocation]
+        P_Dnum[Dnum]:::fk
+    end
+
+    subgraph WORKS_ON["WORKS_ON"]
+        WO_Essn[Essn]:::pk
+        WO_Pno[Pno]:::pk
+        WO_Hours[Hours]
+    end
+
+    subgraph DEPENDENT["DEPENDENT"]
+        DEP_Essn[Essn]:::pk
+        DEP_Dependent_name[Dependent_name]:::pk
+        DEP_Sex[Sex]
+        DEP_Bdate[Bdate]
+        DEP_Relationship[Relationship]
+    end
+
+    %% ==================== RELATIONSHIP LINES ====================
+    EMPLOYEE --- DEPARTMENT
+    EMPLOYEE --- PROJECT
+    EMPLOYEE --- DEPENDENT
+    DEPARTMENT --- DEPT_LOCATIONS
+    DEPARTMENT --- PROJECT
+
+    %% ==================== STYLES ====================
+    classDef pk fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,font-size:13px,text-decoration:underline
+    classDef fk fill:#fff3e0,stroke:#f57c00,stroke-width:2px,font-size:13px
+    classDef table fill:#ffffff,stroke:#333,stroke-width:1px,font-size:12px
+
+    linkStyle default stroke:#666,stroke-width:1px
