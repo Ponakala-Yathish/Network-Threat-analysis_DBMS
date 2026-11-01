@@ -5,9 +5,7 @@ import { successResponse, handleApiError } from '@/lib/api-response';
 export async function GET() {
   try {
     await requireAuth(['Admin']);
-    
-    const stats = await getSystemStats();
-    return successResponse(stats);
+    return successResponse(await getSystemStats());
   } catch (error) {
     return handleApiError(error);
   }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { format } from 'date-fns';
 import { Plus, Trash2, Edit } from 'lucide-react';
@@ -46,6 +46,10 @@ export default function UsersPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchUsers();
+  }, []);
 
   const validateForm = () => {
     const errors: Record<string, string> = {};

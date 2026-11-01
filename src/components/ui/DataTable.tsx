@@ -24,8 +24,13 @@ export type PaginationState = { pageIndex: number; pageSize: number };
 export interface DataTableProps<T> {
   data: T[];
   columns: Column<T>[];
+  /** When provided, the table is SERVER-paginated: `data` is already the current page. */
   totalCount?: number;
   pageCount?: number;
+  /** Controlled 1-based page and page size (keep these in the parent for server paging). */
+  page?: number;
+  pageSize?: number;
+  onPageSizeChange?: (pageSize: number) => void;
   isLoading?: boolean;
   onPageChange?: (page: number) => void;
   onSortChange?: (sorting: SortingState) => void;
@@ -42,6 +47,9 @@ export function DataTable<T>({
   columns,
   totalCount,
   pageCount,
+  page: pageProp,
+  pageSize: pageSizeProp,
+  onPageSizeChange,
   isLoading = false,
   onPageChange,
   onSortChange,
@@ -92,10 +100,18 @@ export function DataTable<T>({
     });
   }, [sortedData, globalFilter, columns]);
 
+  // Server mode: the API already returned exactly one page. Slicing it again
+  // client-side (the old behaviour) made every page after the first render empty.
+  const serverSide = totalCount !== undefined;
+  const pageIndex = pageProp !== undefined ? pageProp - 1 : pagination.pageIndex;
+  const pageSize = pageSizeProp ?? pagination.pageSize;
+  const rowTotal = serverSide ? totalCount! : filteredData.length;
+
   const paginatedData = useMemo(() => {
-    const start = pagination.pageIndex * pagination.pageSize;
-    return filteredData.slice(start, start + pagination.pageSize);
-  }, [filteredData, pagination]);
+    if (serverSide) return filteredData;
+    const start = pageIndex * pageSize;
+    return filteredData.slice(start, start + pageSize);
+  }, [filteredData, serverSide, pageIndex, pageSize]);
 
   const handleSort = (columnId: string) => {
     const existing = sorting.find(s => s.id === columnId);
@@ -111,18 +127,19 @@ export function DataTable<T>({
     onSortChange?.(newSorting);
   };
 
-  const handlePageChange = (pageIndex: number) => {
-    setPagination(p => ({ ...p, pageIndex }));
-    onPageChange?.(pageIndex + 1);
+  const handlePageChange = (nextIndex: number) => {
+    setPagination(p => ({ ...p, pageIndex: nextIndex }));
+    onPageChange?.(nextIndex + 1);
   };
 
-  const handlePageSizeChange = (pageSize: number) => {
-    setPagination(p => ({ ...p, pageSize, pageIndex: 0 }));
+  const handlePageSizeChange = (nextSize: number) => {
+    setPagination(p => ({ ...p, pageSize: nextSize, pageIndex: 0 }));
+    onPageSizeChange?.(nextSize);
     onPageChange?.(1);
   };
 
-  const canPreviousPage = pagination.pageIndex > 0;
-  const canNextPage = (pagination.pageIndex + 1) * pagination.pageSize < (totalCount || filteredData.length);
+  const canPreviousPage = pageIndex > 0;
+  const canNextPage = (pageIndex + 1) * pageSize < rowTotal;
 
   return (
     <div className="space-y-4">
@@ -220,13 +237,13 @@ export function DataTable<T>({
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <span>
               Showing{' '}
-              <strong>{pagination.pageIndex * pagination.pageSize + 1}</strong>{' '}
+              <strong>{rowTotal === 0 ? 0 : pageIndex * pageSize + 1}</strong>{' '}
               to{' '}
-              <strong>{Math.min((pagination.pageIndex + 1) * pagination.pageSize, totalCount || filteredData.length)}</strong>{' '}
-              of <strong>{totalCount || filteredData.length}</strong> results
+              <strong>{Math.min((pageIndex + 1) * pageSize, rowTotal)}</strong>{' '}
+              of <strong>{rowTotal}</strong> results
             </span>
             <select
-              value={pagination.pageSize}
+              value={pageSize}
               onChange={(e) => handlePageSizeChange(Number(e.target.value))}
               className="px-2 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
@@ -241,7 +258,7 @@ export function DataTable<T>({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => handlePageChange(pagination.pageIndex - 1)}
+              onClick={() => handlePageChange(pageIndex - 1)}
               disabled={!canPreviousPage}
             >
               <ChevronLeft className="h-4 w-4" />
@@ -249,7 +266,7 @@ export function DataTable<T>({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => handlePageChange(pagination.pageIndex + 1)}
+              onClick={() => handlePageChange(pageIndex + 1)}
               disabled={!canNextPage}
             >
               <ChevronRight className="h-4 w-4" />

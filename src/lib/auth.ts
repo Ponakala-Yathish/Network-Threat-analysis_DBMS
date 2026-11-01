@@ -1,41 +1,11 @@
-import { SignJWT, jwtVerify } from 'jose';
 import { cookies } from 'next/headers';
-import { UserRole } from '@/types/database';
+import type { UserRole } from '@/types/database';
+import { COOKIE_NAME, COOKIE_OPTIONS, createSession, verifySession } from '@/lib/session';
+import type { SessionPayload } from '@/lib/session';
+import { HttpError } from '@/lib/api-response';
 
-const SECRET_KEY = new TextEncoder().encode(
-  process.env.AUTH_SECRET || 'dev-secret-key-change-in-production-min-32-characters-long'
-);
-const COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'threat_intel_session';
-const COOKIE_OPTIONS = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'lax' as const,
-  maxAge: 60 * 60 * 24 * 7, // 7 days
-  path: '/',
-};
-
-export interface SessionPayload {
-  userId: number;
-  username: string;
-  role: UserRole;
-}
-
-export async function createSession(payload: SessionPayload): Promise<string> {
-  return new SignJWT({ ...payload })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuedAt()
-    .setExpirationTime('7d')
-    .sign(SECRET_KEY);
-}
-
-export async function verifySession(token: string): Promise<SessionPayload | null> {
-  try {
-    const { payload } = await jwtVerify(token, SECRET_KEY);
-    return payload as unknown as SessionPayload;
-  } catch {
-    return null;
-  }
-}
+export { createSession, verifySession };
+export type { SessionPayload };
 
 export async function getSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
@@ -56,11 +26,7 @@ export async function clearSessionCookie(): Promise<void> {
 
 export async function requireAuth(allowedRoles?: UserRole[]): Promise<SessionPayload> {
   const session = await getSession();
-  if (!session) {
-    throw new Error('UNAUTHORIZED');
-  }
-  if (allowedRoles && !allowedRoles.includes(session.role)) {
-    throw new Error('FORBIDDEN');
-  }
+  if (!session) throw new HttpError(401, 'Unauthorized');
+  if (allowedRoles && !allowedRoles.includes(session.role)) throw new HttpError(403, 'Forbidden');
   return session;
 }

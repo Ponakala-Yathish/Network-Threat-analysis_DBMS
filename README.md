@@ -15,7 +15,7 @@ A full-stack web application for automated network threat detection, incident tr
 - **Constraints**: PK, FK, CHECK, UNIQUE, NOT NULL at database level
 - **Indexes**: Optimized for time-series queries and vector similarity search
 
-### Application (Next.js 14)
+### Application (Next.js 16)
 - **Two Roles**: System Admin & Security Analyst (RBAC)
 - **Admin Dashboard**: System stats, audit logs, user management
 - **Analyst Workspace**: Incident queue, resolution workflow, playbook recommendations, traffic log search
@@ -141,7 +141,7 @@ src/
 ├── app/
 │   ├── api/                 # API routes
 │   │   ├── auth/            # Login/logout/session
-│   │   ├── incidents/       # Incident CRUD + resolution + playbooks
+│   │   ├── incidents/       # List, detail, POST /:id/resolve, GET /:id/playbooks
 │   │   ├── traffic-logs/    # Traffic log ingestion + search
 │   │   ├── assets/          # Network assets
 │   │   ├── admin/           # Admin-only endpoints
@@ -154,11 +154,13 @@ src/
 │   └── layout/              # Layout components (Sidebar)
 ├── lib/
 │   ├── db.ts                # PostgreSQL connection pool
-│   ├── auth.ts              # JWT session management
+│   ├── auth.ts              # Cookie-based session helpers + requireAuth()
+│   ├── session.ts           # JWT sign/verify + cookie constants (proxy-safe)
+│   ├── password.ts          # bcrypt hash/verify (constant-time for unknown users)
 │   ├── queries.ts           # Database query functions
 │   ├── validations.ts       # Zod schemas
 │   ├── api-response.ts      # API response helpers
-│   └── embeddings.ts        # Vector embedding utilities
+│   └── embeddings.ts        # Text -> 384-dim vector (shared by playbooks + incidents)
 ├── db/
 │   └── schema.sql           # Complete DDL schema
 ├── scripts/
@@ -168,6 +170,19 @@ src/
 └── types/
     └── database.ts          # TypeScript types
 ```
+
+## Notes on the backend design
+
+- **Migrations** (`npm run db:migrate`) run `src/db/schema.sql` as one transaction and are
+  idempotent. They also upgrade older databases in place (duplicate incidents/playbooks are
+  collapsed, `TIMESTAMP` columns become `TIMESTAMPTZ`).
+- **Brute-force trigger**: 5+ `Failed` logs from one IP within 10 minutes opens **one** Active
+  incident per (attacker, target); a partial unique index enforces it.
+- **Playbook matching** uses a built-in deterministic text embedding (`src/lib/embeddings.ts`),
+  so no external API or model download is needed. To use a neural model instead, make
+  `embedText()` return 384 dims and re-run `npm run db:embed`.
+- Errors map to proper HTTP codes (400 validation, 404 not found, 409 conflicts such as
+  duplicate IP/username or already-resolved incident).
 
 ## Production Deployment
 

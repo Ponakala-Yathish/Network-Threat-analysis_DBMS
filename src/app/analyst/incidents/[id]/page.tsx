@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { format } from 'date-fns';
 import { AlertTriangle, Shield, Server, Network, Target, Copy, CheckCircle, RefreshCw } from 'lucide-react';
@@ -58,32 +58,34 @@ export default function IncidentDetailPage() {
     setLoading(true);
     setError('');
     try {
-      const [incidentRes, blastRes, playbooksRes] = await Promise.all([
-        fetch(`/api/incidents/${incidentId}`),
-        fetch(`/api/blast-radius/${incidentId}`),
-        fetch(`/api/incidents/${incidentId}/playbooks`),
-      ]);
-
+      // Playbooks only need the incident id, so start them immediately.
+      const playbooksPromise = fetch(`/api/incidents/${incidentId}/playbooks`);
+      const incidentRes = await fetch(`/api/incidents/${incidentId}`);
       if (!incidentRes.ok) throw new Error('Failed to fetch incident');
 
       const incidentData = await incidentRes.json();
       setIncident(incidentData);
 
-      if (blastRes.ok) {
-        const blastData = await blastRes.json();
-        setBlastRadius(blastData);
-      }
+      // Blast radius is computed per ASSET. This used to pass the incident id,
+      // which returned the numbers for an unrelated asset (or a wrong 404).
+      const [blastRes, playbooksRes] = await Promise.all([
+        fetch(`/api/blast-radius/${incidentData.target_id}`),
+        playbooksPromise,
+      ]);
 
-      if (playbooksRes.ok) {
-        const playbooksData = await playbooksRes.json();
-        setPlaybooks(playbooksData);
-      }
+      if (blastRes.ok) setBlastRadius(await blastRes.json());
+      if (playbooksRes.ok) setPlaybooks(await playbooksRes.json());
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchIncident();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incidentId]);
 
   const handleResolve = async () => {
     setResolving(true);
@@ -236,7 +238,7 @@ export default function IncidentDetailPage() {
                   </div>
                   <div className="p-4 bg-purple-50 rounded-lg">
                     <p className="text-sm text-purple-600">Risk Score</p>
-                    <p className="text-2xl font-bold text-purple-900">{blastRadius.risk_score.toFixed(1)}</p>
+                    <p className="text-2xl font-bold text-purple-900">{Number(blastRadius.risk_score).toFixed(1)}</p>
                   </div>
                 </div>
                 <p className="text-sm text-gray-500 mt-4">
