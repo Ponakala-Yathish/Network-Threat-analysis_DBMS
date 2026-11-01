@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { redirect } from 'next/navigation';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Button } from '@/components/ui/Button';
 import { LogOut } from 'lucide-react';
@@ -9,28 +9,26 @@ import { LogOut } from 'lucide-react';
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<{ username: string; role: string } | null>(null);
   const [loading, setLoading] = useState(true);
+  const router = useRouter();
 
-  // Check session via API
-  async function checkSession() {
-    try {
-      const res = await fetch('/api/auth/session');
-      if (res.ok) {
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/session');
+        if (!res.ok) throw new Error('no session');
         const data = await res.json();
-        setSession(data);
-      } else {
-        redirect('/login');
+        if (active) setSession(data);
+      } catch {
+        if (active) router.replace('/login');
+      } finally {
+        if (active) setLoading(false);
       }
-    } catch {
-      redirect('/login');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // Run on mount
-  if (typeof window !== 'undefined') {
-    checkSession();
-  }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [router]);
 
   if (loading || !session) {
     return <div className="min-h-screen flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" /></div>;
@@ -38,7 +36,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
-    redirect('/login');
+    router.replace('/login');
   };
 
   return (

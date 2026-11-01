@@ -1,36 +1,24 @@
-import { searchPlaybooksByVector } from '@/lib/queries';
-import { getIncidentById } from '@/lib/queries';
+import { NextRequest } from 'next/server';
+import { searchPlaybooksByVector, getIncidentById } from '@/lib/queries';
 import { requireAuth } from '@/lib/auth';
-import { generateIncidentEmbedding, embeddingToPgVector } from '@/lib/embeddings';
-import { successResponse, errorResponse, handleApiError } from '@/lib/api-response';
+import { embedText } from '@/lib/embeddings';
+import { idParamSchema, playbookQuerySchema } from '@/lib/validations';
+import { successResponse, errorResponse, handleApiError, searchParamsToObject } from '@/lib/api-response';
 
-export async function GET(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     await requireAuth(['Admin', 'Analyst']);
-    
-    const { id } = await params;
-    const incidentId = parseInt(id);
-    
-    if (isNaN(incidentId)) {
-      return errorResponse('Invalid incident ID', 400);
-    }
-    
-    const incident = await getIncidentById(incidentId);
-    if (!incident) {
-      return errorResponse('Incident not found', 404);
-    }
-    
-    // Generate embedding from incident description
-    const description = incident.description || `Attack from ${incident.attacker_ip} targeting ${incident.asset.internal_ip}`;
-    const embedding = await generateIncidentEmbedding(description);
-    const vectorStr = embeddingToPgVector(embedding);
-    
-    // Search for similar playbooks
-    const playbooks = await searchPlaybooksByVector(embedding, 3);
-    
+    const parsedId = idParamSchema.safeParse((await params).id);
+    if (!parsedId.success) return errorResponse('Invalid incident ID', 400);
+    const { limit } = playbookQuerySchema.parse(searchParamsToObject(request.nextUrl.searchParams));
+
+    const incident = await getIncidentById(parsedId.data);
+    if (!incident) return errorResponse('Incident not found', 404);
+
+    // (Was `incident.asset.internal_ip` -- but rows are flat, so `asset` was undefined
+    // and any incident without a description crashed with a TypeError.)
+    const text = incident.description || `Attack from ${incident.attacker_ip} targeting ${incident.target_ip}`;
+    const playbooks = await searchPlaybooksByVector(embedText(text), limit);
     return successResponse(playbooks);
   } catch (error) {
     return handleApiError(error);

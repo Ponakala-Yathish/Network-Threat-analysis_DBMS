@@ -3,16 +3,16 @@
 // Run with: npx tsx src/scripts/seed.ts
 
 import 'dotenv/config';
-import bcrypt from 'bcryptjs';
-import { query, transaction, closePool } from '../lib/db.js';
+import { transaction, closePool } from '../lib/db';
+import { hashPassword } from '../lib/password';
 
 async function seedDatabase() {
   console.log('🌱 Starting database seeding...');
   
   try {
     // Hash passwords
-    const adminHash = await bcrypt.hash('admin123', 12);
-    const analystHash = await bcrypt.hash('analyst123', 12);
+    const adminHash = await hashPassword('admin123');
+    const analystHash = await hashPassword('analyst123');
     
     await transaction(async (client) => {
       // Seed Users
@@ -120,7 +120,7 @@ async function seedDatabase() {
           '1. Implement rate limiting on login endpoints\n2. Deploy credential leak monitoring\n3. Force password reset for compromised accounts\n4. Require MFA for all users\n5. Implement device fingerprinting\n6. Use CAPTCHA on login forms\n7. Monitor for distributed login attempts',
           ARRAY['credential-stuffing', 'authentication', 'credential-access', 'mitre-t1110.004']
         )
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (title) DO NOTHING
       `);
       
       console.log('  ✅ Seed data inserted successfully');

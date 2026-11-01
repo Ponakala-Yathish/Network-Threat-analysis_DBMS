@@ -1,7 +1,11 @@
 import { clearSessionCookie } from '@/lib/auth';
-import { successResponse } from '@/lib/api-response';
+import { successResponse, handleApiError } from '@/lib/api-response';
 
 export async function POST() {
-  await clearSessionCookie();
-  return successResponse({ message: 'Logged out successfully' });
+  try {
+    await clearSessionCookie();
+    return successResponse({ message: 'Logged out successfully' });
+  } catch (error) {
+    return handleApiError(error);
+  }
 }

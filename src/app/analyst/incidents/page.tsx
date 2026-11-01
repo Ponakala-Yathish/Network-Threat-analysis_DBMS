@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { format } from 'date-fns';
 import { Search, Filter, RefreshCw } from 'lucide-react';
@@ -62,6 +62,14 @@ export default function IncidentsPage() {
       setLoading(false);
     }
   };
+
+  // Load on mount and whenever paging/filters change. Debounced so typing in a
+  // filter box doesn't fire one request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(fetchData, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize, filters]);
 
   const columns: Column<IncidentRow>[] = [
     {
@@ -231,7 +239,10 @@ export default function IncidentsPage() {
         totalCount={total}
         pageCount={Math.ceil(total / pageSize)}
         isLoading={loading}
+        page={page}
+        pageSize={pageSize}
         onPageChange={setPage}
+        onPageSizeChange={setPageSize}
         pageSizeOptions={[10, 20, 50, 100]}
       />
     </div>

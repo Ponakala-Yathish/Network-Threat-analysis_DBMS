@@ -6,6 +6,7 @@ import { Shield, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Suspense } from 'react';
+import Link from 'next/link';
 
 function LoginForm() {
   const router = useRouter();
@@ -37,8 +38,12 @@ function LoginForm() {
       }
 
       // Redirect based on role
-      const roleRedirect = data.user?.role === 'Admin' ? '/admin/dashboard' : '/analyst/incidents';
-      router.push(roleRedirect);
+      const roleHome = data.user?.role === 'Admin' ? '/admin/dashboard' : '/analyst/incidents';
+      // Only follow same-site, role-appropriate redirects (blocks open-redirects like //evil.com).
+      const rolePrefix = data.user?.role === 'Admin' ? '/admin' : '/analyst';
+      const target = redirect.startsWith(rolePrefix) && !redirect.startsWith('//') ? redirect : roleHome;
+      router.replace(target);
+      router.refresh();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -117,8 +122,6 @@ function LoginForm() {
   );
 }
 
-// Need to import Link
-import Link from 'next/link';
 
 export default function LoginPage() {
   return (

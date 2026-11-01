@@ -1,54 +1,45 @@
 #!/usr/bin/env node
-// Database Migration Runner
-// Run with: npx tsx src/scripts/migrate.ts
+// Database migration runner.  Run with: npm run db:migrate
+//
+// The previous version split schema.sql on ";" and dropped every chunk that
+// began with a "--" comment. That discarded most CREATE TABLE statements and
+// would also have cut the PL/pgSQL function bodies in half. PostgreSQL's
+// simple-query protocol accepts a whole multi-statement script (including
+// $$-quoted function bodies), so we send the file as one unit inside a single
+// transaction: it either applies completely or not at all.
 
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { query, closePool } from '../lib/db.js';
+import pool, { closePool } from '../lib/db';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const MIGRATION_LOCK_ID = 727274; // arbitrary constant so two runners can't race
 
 async function runMigration() {
   console.log('🚀 Starting database migration...');
-  
-  const schemaPath = path.join(__dirname, '../db/schema.sql');
+
+  const schemaPath = path.join(process.cwd(), 'src', 'db', 'schema.sql');
   const schema = fs.readFileSync(schemaPath, 'utf-8');
-  
-  // Split by semicolon but be careful with function definitions
-  const statements = schema
-    .split(';')
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !s.startsWith('--'));
-  
-  console.log(`📝 Found ${statements.length} SQL statements to execute`);
-  
-  for (let i = 0; i < statements.length; i++) {
-    const statement = statements[i] + ';';
-    try {
-      await query(statement);
-      console.log(`  ✓ Statement ${i + 1}/${statements.length} executed`);
-    } catch (error: any) {
-      // Some statements might fail if already exist (IF NOT EXISTS handles most)
-      if (error.code === '42710' || error.code === '42P07' || error.message.includes('already exists')) {
-        console.log(`  ⚠ Statement ${i + 1}/${statements.length} skipped (already exists)`);
-      } else {
-        console.error(`  ✗ Statement ${i + 1}/${statements.length} failed:`, error.message);
-        console.error('Statement:', statement.substring(0, 200));
-        throw error;
-      }
-    }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_ID]);
+    await client.query(schema);
+    await client.query('COMMIT');
+    console.log('✅ Migration completed successfully!');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
-  
-  console.log('✅ Migration completed successfully!');
-  await closePool();
-  process.exit(0);
 }
 
-runMigration().catch(async (error) => {
-  console.error('❌ Migration failed:', error);
-  await closePool();
-  process.exit(1);
-});
+runMigration()
+  .then(() => closePool().then(() => process.exit(0)))
+  .catch(async (error) => {
+    console.error('❌ Migration failed:', error instanceof Error ? error.message : error);
+    await closePool().catch(() => undefined);
+    process.exit(1);
+  });

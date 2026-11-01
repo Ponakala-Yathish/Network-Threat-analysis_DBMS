@@ -66,17 +66,19 @@ export interface SecurityPlaybook {
   created_at: Date;
 }
 
-export interface IncidentWithAsset extends Incident {
-  asset: NetworkAsset;
+// The API joins the target asset's columns onto each row (flat, not nested).
+export interface AssetColumns {
+  target_ip: string;
+  target_hostname: string | null;
+  asset_criticality: number;
+  asset_department: string | null;
 }
 
-export interface TrafficLogWithAsset extends TrafficLog {
-  asset: NetworkAsset;
-}
+export type IncidentWithAsset = Incident & AssetColumns;
+
+export type TrafficLogWithAsset = TrafficLog & AssetColumns;
 
 export interface AuditLogWithRelations extends AuditLog {
-  incident: Incident;
-  user: User;
   incident_attacker_ip: string;
   incident_status: string;
   user_username: string;
@@ -89,7 +91,10 @@ export interface BlastRadiusResult {
   risk_score: number;
 }
 
-export interface PlaybookSearchResult extends SecurityPlaybook {
+// The (384-float) embedding column is never sent to clients.
+export type PlaybookSummary = Omit<SecurityPlaybook, 'vector'>;
+
+export interface PlaybookSearchResult extends PlaybookSummary {
   similarity: number;
 }
 
