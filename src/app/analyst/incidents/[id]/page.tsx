@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { format } from 'date-fns';
-import { AlertTriangle, Shield, Server, Network, Target, Copy, CheckCircle, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Shield, Server, Network, Target, Copy, CheckCircle, RefreshCw, Share2 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
@@ -32,6 +32,15 @@ interface BlastRadius {
   risk_score: number;
 }
 
+interface ReachableAsset {
+  asset_id: number;
+  hostname: string | null;
+  internal_ip: string;
+  criticality: number;
+  hops: number;
+  path: string;
+}
+
 interface Playbook {
   playbook_id: number;
   title: string;
@@ -41,6 +50,42 @@ interface Playbook {
   similarity: number;
 }
 
+interface IncidentBundle {
+  incident: IncidentDetail;
+  blastRadius: BlastRadius | null;
+  playbooks: Playbook[] | null;
+  reachable: ReachableAsset[] | null;
+}
+
+/** Loads an incident plus its analysis panels. Throws if the incident itself fails. Touches no React state. */
+async function requestIncident(incidentId: number): Promise<IncidentBundle> {
+  // Playbooks only need the incident id, so start them immediately.
+  const playbooksPromise = fetch(`/api/incidents/${incidentId}/playbooks`);
+  const incidentRes = await fetch(`/api/incidents/${incidentId}`);
+  if (!incidentRes.ok) throw new Error('Failed to fetch incident');
+  const incident: IncidentDetail = await incidentRes.json();
+
+  // Blast radius is computed per ASSET. This used to pass the incident id,
+  // which returned the numbers for an unrelated asset (or a wrong 404).
+  const [blastRes, playbooksRes, reachRes] = await Promise.all([
+    fetch(`/api/blast-radius/${incident.target_id}`),
+    playbooksPromise,
+    fetch(`/api/assets/${incident.target_id}/reachable?max_hops=5`),
+  ]);
+
+  return {
+    incident,
+    blastRadius: blastRes.ok ? await blastRes.json() : null,
+    playbooks: playbooksRes.ok ? await playbooksRes.json() : null,
+    // Drop hop 0: that is the target itself.
+    reachable: reachRes.ok
+      ? (await reachRes.json()).filter((r: ReachableAsset) => r.hops > 0)
+      : null,
+  };
+}
+
+const errorMessage = (err: unknown) => (err instanceof Error ? err.message : 'Something went wrong');
+
 export default function IncidentDetailPage() {
   const params = useParams();
   const incidentId = parseInt(params.id as string);
@@ -48,43 +93,44 @@ export default function IncidentDetailPage() {
   const [incident, setIncident] = useState<IncidentDetail | null>(null);
   const [blastRadius, setBlastRadius] = useState<BlastRadius | null>(null);
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
+  const [reachable, setReachable] = useState<ReachableAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState(false);
   const [resolveModalOpen, setResolveModalOpen] = useState(false);
   const [resolveNotes, setResolveNotes] = useState('');
   const [error, setError] = useState('');
 
+  const applyBundle = (b: IncidentBundle) => {
+    setIncident(b.incident);
+    if (b.blastRadius) setBlastRadius(b.blastRadius);
+    if (b.playbooks) setPlaybooks(b.playbooks);
+    if (b.reachable) setReachable(b.reachable);
+  };
+
+  // Refresh button and after resolving.
   const fetchIncident = async () => {
     setLoading(true);
     setError('');
     try {
-      // Playbooks only need the incident id, so start them immediately.
-      const playbooksPromise = fetch(`/api/incidents/${incidentId}/playbooks`);
-      const incidentRes = await fetch(`/api/incidents/${incidentId}`);
-      if (!incidentRes.ok) throw new Error('Failed to fetch incident');
-
-      const incidentData = await incidentRes.json();
-      setIncident(incidentData);
-
-      // Blast radius is computed per ASSET. This used to pass the incident id,
-      // which returned the numbers for an unrelated asset (or a wrong 404).
-      const [blastRes, playbooksRes] = await Promise.all([
-        fetch(`/api/blast-radius/${incidentData.target_id}`),
-        playbooksPromise,
-      ]);
-
-      if (blastRes.ok) setBlastRadius(await blastRes.json());
-      if (playbooksRes.ok) setPlaybooks(await playbooksRes.json());
-    } catch (err: any) {
-      setError(err.message);
+      applyBundle(await requestIncident(incidentId));
+    } catch (err) {
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
   };
 
+  // Initial load. `loading` already starts as true; state is only set once the
+  // requests settle, and ignored if the user navigated to another incident first.
   useEffect(() => {
-    fetchIncident();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let cancelled = false;
+    requestIncident(incidentId)
+      .then((b) => { if (!cancelled) applyBundle(b); })
+      .catch((err) => { if (!cancelled) setError(errorMessage(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => {
+      cancelled = true;
+    };
   }, [incidentId]);
 
   const handleResolve = async () => {
@@ -104,8 +150,8 @@ export default function IncidentDetailPage() {
       setResolveModalOpen(false);
       setResolveNotes('');
       fetchIncident();
-    } catch (err: any) {
-      alert(err.message);
+    } catch (err) {
+      alert(errorMessage(err));
     } finally {
       setResolving(false);
     }
@@ -247,6 +293,50 @@ export default function IncidentDetailPage() {
               </CardContent>
             </Card>
           )}
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Share2 className="h-5 w-5 text-orange-600" />
+                Lateral Movement Risk
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-gray-500 mb-4">
+                Assets reachable from the target through network connections (recursive query, up to 5 hops).
+              </p>
+              {reachable.length === 0 ? (
+                <p className="text-gray-500 text-sm">The target has no outgoing connections.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 text-left text-gray-600">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">Hops</th>
+                        <th className="px-3 py-2 font-medium">Asset</th>
+                        <th className="px-3 py-2 font-medium">Criticality</th>
+                        <th className="px-3 py-2 font-medium">Path</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {reachable.map((r) => (
+                        <tr key={r.asset_id}>
+                          <td className="px-3 py-2">{r.hops}</td>
+                          <td className="px-3 py-2">{r.hostname || r.internal_ip}</td>
+                          <td className="px-3 py-2">
+                            <Badge variant={r.criticality >= 8 ? 'danger' : r.criticality >= 5 ? 'warning' : 'success'}>
+                              {r.criticality}/10
+                            </Badge>
+                          </td>
+                          <td className="px-3 py-2 text-gray-600">{r.path}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           {playbooks.length > 0 && (
             <Card>
