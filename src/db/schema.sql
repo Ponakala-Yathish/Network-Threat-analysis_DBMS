@@ -139,6 +139,42 @@ CREATE INDEX IF NOT EXISTS idx_security_playbooks_vector_hnsw
     ON Security_Playbooks USING hnsw (vector vector_cosine_ops);
 
 -- ============================================
+-- ASSET CONNECTIONS (network topology)
+--   A directed edge "src can reach dst" (e.g. web server -> app server).
+--   Used by the recursive query get_reachable_assets() to find every asset an
+--   attacker could move to after compromising one (lateral movement).
+--   Composite primary key: one row per (src, dst) pair.
+-- ============================================
+CREATE TABLE IF NOT EXISTS Asset_Connections (
+    src_asset_id    INTEGER     NOT NULL REFERENCES Network_Assets(asset_id) ON DELETE CASCADE,
+    dst_asset_id    INTEGER     NOT NULL REFERENCES Network_Assets(asset_id) ON DELETE CASCADE,
+    connection_type VARCHAR(30) NOT NULL DEFAULT 'network'
+                    CHECK (connection_type IN ('network', 'database', 'file-share', 'admin', 'replication')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (src_asset_id, dst_asset_id),
+    CHECK (src_asset_id <> dst_asset_id)
+);
+-- The PK index serves "edges leaving X"; this one serves "edges arriving at X".
+CREATE INDEX IF NOT EXISTS idx_asset_connections_dst ON Asset_Connections(dst_asset_id);
+
+-- ============================================
+-- TRAFFIC LOGS ARCHIVE
+--   Filled by the archive_old_logs procedure. No FK to Network_Assets on
+--   purpose: archived history must survive the asset being deleted later.
+-- ============================================
+CREATE TABLE IF NOT EXISTS Traffic_Logs_Archive (
+    log_id            BIGINT      PRIMARY KEY,
+    attacker_ip       INET        NOT NULL,
+    target_id         INTEGER     NOT NULL,
+    status            VARCHAR(20) NOT NULL,
+    protocol          VARCHAR(20),
+    port              INTEGER,
+    bytes_transferred BIGINT      NOT NULL DEFAULT 0,
+    timestamp         TIMESTAMPTZ NOT NULL,
+    archived_at       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================
 -- UPGRADE: TIMESTAMP -> TIMESTAMPTZ
 -- Naive timestamps were stored in the DB server's local time but read back by
 -- node-pg in the *app server's* local time (and filters sent from JS had their
@@ -169,8 +205,15 @@ END $$;
 --   per (attacker, target). Further failures while that incident is open are
 --   cheap no-ops.
 -- ============================================
+-- SECURITY DEFINER: the trigger fires when an *analyst* inserts a traffic log,
+-- but analysts have no INSERT privilege on Incidents (see ROLE-BASED ACCESS
+-- below). The function therefore runs with its owner's rights, and a fixed
+-- search_path stops callers from redirecting it to look-alike tables.
 CREATE OR REPLACE FUNCTION detect_brute_force()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 DECLARE
     failed_count      INTEGER;
     asset_criticality INTEGER;
@@ -222,6 +265,55 @@ CREATE TRIGGER trigger_detect_brute_force
     EXECUTE FUNCTION detect_brute_force();
 
 -- ============================================
+-- FUNCTION: reachable assets (RECURSIVE CTE)
+--   Every asset reachable from p_start_asset by following Asset_Connections,
+--   up to p_max_hops edges away, with the shortest hop count and the path.
+--   The `NOT ... = ANY(path)` guard stops the recursion going round cycles
+--   (A -> B -> A ...), so it always terminates.
+-- ============================================
+DROP FUNCTION IF EXISTS get_reachable_assets(INTEGER, INTEGER);
+CREATE FUNCTION get_reachable_assets(p_start_asset INTEGER, p_max_hops INTEGER DEFAULT 5)
+RETURNS TABLE(
+    asset_id    INTEGER,
+    hostname    VARCHAR,
+    internal_ip INET,
+    criticality INTEGER,
+    department  VARCHAR,
+    hops        INTEGER,
+    path        TEXT
+) AS $$
+    WITH RECURSIVE reach(asset_id, hops, path) AS (
+        -- anchor: the compromised asset itself (0 hops)
+        SELECT p_start_asset, 0, ARRAY[p_start_asset]
+        UNION ALL
+        -- recursive step: follow one more outgoing connection
+        SELECT c.dst_asset_id, r.hops + 1, r.path || c.dst_asset_id
+        FROM reach r
+        JOIN Asset_Connections c ON c.src_asset_id = r.asset_id
+        WHERE r.hops < p_max_hops
+          AND NOT (c.dst_asset_id = ANY(r.path))
+    ),
+    shortest AS (
+        -- an asset can be reached by several routes; keep the shortest one
+        SELECT DISTINCT ON (asset_id) asset_id, hops, path
+        FROM reach
+        ORDER BY asset_id, hops
+    )
+    SELECT na.asset_id,
+           na.hostname,
+           na.internal_ip,
+           na.criticality,
+           na.department,
+           s.hops,
+           (SELECT string_agg(COALESCE(n2.hostname, host(n2.internal_ip)), ' -> ' ORDER BY u.ord)
+              FROM unnest(s.path) WITH ORDINALITY AS u(id, ord)
+              JOIN Network_Assets n2 ON n2.asset_id = u.id) AS path
+    FROM shortest s
+    JOIN Network_Assets na ON na.asset_id = s.asset_id
+    ORDER BY s.hops, na.criticality DESC, na.asset_id;
+$$ LANGUAGE sql STABLE;
+
+-- ============================================
 -- FUNCTION: compute blast radius
 --   (return type changed to DOUBLE PRECISION so JSON clients get a number)
 -- ============================================
@@ -252,6 +344,10 @@ RETURNS TABLE(
                 SELECT DISTINCT attacker_ip FROM Traffic_Logs WHERE target_id = target_asset_id
             )
         )
+        UNION
+        -- everything reachable through the network topology (recursive, 5 hops)
+        SELECT r.asset_id, r.criticality
+        FROM get_reachable_assets(target_asset_id, 5) r
     )
     SELECT
         COUNT(*)::INTEGER,
@@ -271,7 +367,14 @@ CREATE OR REPLACE FUNCTION resolve_incident(
     p_user_id     INTEGER,
     p_notes       TEXT
 )
-RETURNS VOID AS $$
+RETURNS VOID
+-- Runs with the owner's rights so an analyst can resolve incidents without
+-- holding direct UPDATE rights on Incidents/Network_Assets or INSERT on
+-- Audit_Logs. EXECUTE is revoked from PUBLIC and granted only to the two app
+-- roles further down, so this is the ONLY way an analyst can change them.
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 DECLARE
     v_target_id  INTEGER;
     v_old_status VARCHAR(20);
@@ -303,6 +406,37 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================
+-- PROCEDURE: archive old traffic logs
+--   Moves every log older than p_days into Traffic_Logs_Archive in ONE
+--   statement (a data-modifying CTE: DELETE ... RETURNING feeds the INSERT),
+--   so a log can never be lost or duplicated half-way. Returns the number of
+--   rows moved through the INOUT parameter.
+--   Usage:  CALL archive_old_logs(30, NULL);
+-- ============================================
+CREATE OR REPLACE PROCEDURE archive_old_logs(p_days INTEGER, INOUT p_archived INTEGER DEFAULT NULL)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF p_days IS NULL OR p_days < 1 THEN
+        RAISE EXCEPTION 'p_days must be at least 1 (got %)', p_days USING ERRCODE = '22023';
+    END IF;
+
+    WITH moved AS (
+        DELETE FROM Traffic_Logs
+        WHERE timestamp < NOW() - make_interval(days => p_days)
+        RETURNING log_id, attacker_ip, target_id, status, protocol, port, bytes_transferred, timestamp
+    )
+    INSERT INTO Traffic_Logs_Archive
+        (log_id, attacker_ip, target_id, status, protocol, port, bytes_transferred, timestamp)
+    SELECT log_id, attacker_ip, target_id, status, protocol, port, bytes_transferred, timestamp
+    FROM moved
+    ON CONFLICT (log_id) DO NOTHING;
+
+    GET DIAGNOSTICS p_archived = ROW_COUNT;
+END;
+$$;
+
+-- ============================================
 -- VIEWS (no ORDER BY inside a view: callers sort, and it forces a sort on every use)
 -- ============================================
 CREATE VIEW active_incidents_view AS
@@ -327,3 +461,85 @@ SELECT
     na.department  AS asset_department
 FROM Traffic_Logs tl
 JOIN Network_Assets na ON tl.target_id = na.asset_id;
+
+-- ============================================
+-- ROLE-BASED ACCESS CONTROL (inside the database)
+--
+--   threat_admin    group role for logged-in Admins: full read/write
+--   threat_analyst  group role for logged-in Analysts: read the threat data,
+--                   insert traffic logs, resolve incidents through
+--                   resolve_incident(). NO access to Users; Audit_Logs only
+--                   through row-level security (their own rows).
+--   threat_auth     used before anyone is logged in: may only read Users
+--                   (to check a password at login)
+--   threat_app      the LOGIN role the web app connects as. NOINHERIT means
+--                   it has no privileges of its own: on every query the app
+--                   runs `SET ROLE` to the group role of the logged-in user
+--                   (see src/lib/db.ts). Its password is set by db:migrate.
+--
+--   Roles are cluster-wide objects, so they are created only if missing.
+-- ============================================
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'threat_admin') THEN
+        CREATE ROLE threat_admin NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'threat_analyst') THEN
+        CREATE ROLE threat_analyst NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'threat_auth') THEN
+        CREATE ROLE threat_auth NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'threat_app') THEN
+        CREATE ROLE threat_app LOGIN NOINHERIT;
+    END IF;
+END $$;
+
+GRANT threat_admin, threat_analyst, threat_auth TO threat_app;
+
+-- Start from a clean slate each run so re-running the migration never leaves
+-- behind a privilege that was removed from this file.
+REVOKE ALL ON ALL TABLES    IN SCHEMA public FROM threat_admin, threat_analyst, threat_auth, threat_app;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM threat_admin, threat_analyst, threat_auth, threat_app;
+GRANT USAGE ON SCHEMA public TO threat_admin, threat_analyst, threat_auth;
+
+-- Admin: full DML on every table and view
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO threat_admin;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO threat_admin;
+
+-- Analyst: read-only on threat data, may submit traffic logs
+GRANT SELECT ON Network_Assets, Asset_Connections, Traffic_Logs, Incidents,
+                Security_Playbooks, active_incidents_view, traffic_logs_with_assets
+    TO threat_analyst;
+GRANT INSERT ON Traffic_Logs TO threat_analyst;
+GRANT USAGE ON SEQUENCE traffic_logs_log_id_seq TO threat_analyst;
+GRANT SELECT ON Audit_Logs TO threat_analyst;   -- filtered by the RLS policy below
+
+-- Not logged in: can only look up a user to check the password
+GRANT SELECT ON Users TO threat_auth;
+
+-- Functions are executable by PUBLIC by default. resolve_incident is
+-- SECURITY DEFINER, so restrict who may call it.
+REVOKE EXECUTE ON FUNCTION resolve_incident(BIGINT, INTEGER, TEXT) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION resolve_incident(BIGINT, INTEGER, TEXT) TO threat_admin, threat_analyst;
+REVOKE EXECUTE ON PROCEDURE archive_old_logs(INTEGER, INTEGER) FROM PUBLIC;
+GRANT  EXECUTE ON PROCEDURE archive_old_logs(INTEGER, INTEGER) TO threat_admin;
+
+-- ============================================
+-- ROW-LEVEL SECURITY on Audit_Logs
+--   Admins see every row. Analysts see only the rows they wrote themselves:
+--   the app puts the logged-in user's id in the `app.user_id` setting.
+--   (The table owner and superusers bypass RLS, which is why the
+--   SECURITY DEFINER resolve_incident can still insert audit rows.)
+-- ============================================
+ALTER TABLE Audit_Logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS audit_admin_all ON Audit_Logs;
+CREATE POLICY audit_admin_all ON Audit_Logs
+    FOR ALL TO threat_admin
+    USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS audit_analyst_own ON Audit_Logs;
+CREATE POLICY audit_analyst_own ON Audit_Logs
+    FOR SELECT TO threat_analyst
+    USING (user_id = NULLIF(current_setting('app.user_id', true), '')::INTEGER);
