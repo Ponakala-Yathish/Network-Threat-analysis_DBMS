@@ -72,3 +72,9 @@ export function handleApiError(error: unknown, defaultMessage = 'Internal server
   console.error('API Error:', error);
   return errorResponse(defaultMessage, 500);
 }
+
+/** 400 response for a failed zod safeParse: first message as `error`, per-field messages as `details`. */
+export function validationErrorResponse(error: ZodError) {
+  const first = error.issues[0]?.message || 'Validation failed';
+  return errorResponse(first, 400, error.flatten().fieldErrors);
+}

@@ -110,6 +110,67 @@ export const playbookQuerySchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Assets (update) and topology
+// ---------------------------------------------------------------------------
+const optionalText = (max: number) =>
+  z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.string().max(max).nullable().optional());
+
+export const updateAssetSchema = z
+  .object({
+    hostname: optionalText(100),
+    criticality: z.number().int().min(1).max(10).optional(),
+    department: optionalText(50),
+  })
+  .refine((d) => Object.values(d).some((v) => v !== undefined), { error: 'No fields to update' });
+
+export const CONNECTION_TYPES = ['network', 'database', 'file-share', 'admin', 'replication'] as const;
+
+export const assetConnectionSchema = z
+  .object({
+    src_asset_id: z.coerce.number().int().positive(),
+    dst_asset_id: z.coerce.number().int().positive(),
+    connection_type: z.enum(CONNECTION_TYPES).default('network'),
+  })
+  .refine((d) => d.src_asset_id !== d.dst_asset_id, {
+    error: 'An asset cannot connect to itself',
+    path: ['dst_asset_id'],
+  });
+
+export const reachableQuerySchema = z.object({
+  max_hops: z.coerce.number().int().min(1).max(10).default(5),
+});
+
+export const archiveLogsSchema = z.object({
+  older_than_days: z.coerce.number().int().min(1).max(3650).default(30),
+});
+
+// ---------------------------------------------------------------------------
+// Security playbooks (vector CRUD)
+// ---------------------------------------------------------------------------
+const tagList = z
+  .array(z.string().trim().min(1).max(50))
+  .max(20)
+  .nullable()
+  .optional();
+
+export const createPlaybookSchema = z.object({
+  title: z.string().trim().min(3, 'Title must be at least 3 characters').max(200),
+  threat_category: optionalText(100),
+  description: z.string().trim().min(10, 'Description must be at least 10 characters').max(5000),
+  mitigation: z.string().trim().min(10, 'Mitigation must be at least 10 characters').max(10000),
+  tags: tagList,
+});
+
+export const updatePlaybookSchema = createPlaybookSchema
+  .partial()
+  .refine((d) => Object.values(d).some((v) => v !== undefined), { error: 'No fields to update' });
+
+export const playbookSearchSchema = z.object({
+  q: z.string().trim().max(2000).optional(),
+  limit: z.coerce.number().int().min(1).max(20).default(5),
+});
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 export type LoginInput = z.infer<typeof loginSchema>;

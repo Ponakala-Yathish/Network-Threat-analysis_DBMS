@@ -94,6 +94,22 @@ export function embedText(text: string): number[] {
   return vec.map((v) => Number((v / norm).toFixed(6)));
 }
 
+/**
+ * The text a playbook's vector is computed from. Shared by the API (create /
+ * update) and `npm run db:embed`, so both produce exactly the same vector.
+ */
+export function playbookEmbeddingText(pb: {
+  title: string;
+  threat_category?: string | null;
+  description: string;
+  mitigation: string;
+  tags?: string[] | null;
+}): string {
+  return [pb.title, pb.threat_category, pb.description, pb.mitigation, (pb.tags ?? []).join(' ')]
+    .filter(Boolean)
+    .join('. ');
+}
+
 /** Kept for backwards compatibility with existing imports. */
 export async function generateIncidentEmbedding(description: string): Promise<number[]> {
   return embedText(description);

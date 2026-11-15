@@ -9,13 +9,15 @@
 // playbook each run, which takes milliseconds.
 
 import 'dotenv/config';
+import './use-owner-connection';
 import { query, closePool } from '../lib/db';
-import { embedText, embeddingToPgVector } from '../lib/embeddings';
+import type { SecurityPlaybook } from '../types/database';
+import { embedText, embeddingToPgVector, playbookEmbeddingText } from '../lib/embeddings';
 
 async function embedPlaybooks() {
   console.log('🔮 Generating embeddings for security playbooks...');
 
-  const result = await query(
+  const result = await query<Omit<SecurityPlaybook, 'vector' | 'created_at'>>(
     'SELECT playbook_id, title, threat_category, description, mitigation, tags FROM Security_Playbooks ORDER BY playbook_id'
   );
   if (result.rows.length === 0) {
@@ -24,9 +26,7 @@ async function embedPlaybooks() {
   }
 
   for (const pb of result.rows) {
-    const text = [pb.title, pb.threat_category, pb.description, pb.mitigation, (pb.tags ?? []).join(' ')]
-      .filter(Boolean)
-      .join('. ');
+    const text = playbookEmbeddingText(pb);
     await query('UPDATE Security_Playbooks SET vector = $1::vector WHERE playbook_id = $2', [
       embeddingToPgVector(embedText(text)),
       pb.playbook_id,

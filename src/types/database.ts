@@ -121,3 +121,63 @@ export interface ApiError {
   message?: string;
   statusCode: number;
 }
+// ============================================
+// Added: topology, analytics, archive
+// ============================================
+export interface AssetConnection {
+  src_asset_id: number;
+  dst_asset_id: number;
+  connection_type: 'network' | 'database' | 'file-share' | 'admin' | 'replication';
+  created_at: Date;
+}
+
+export interface AssetConnectionWithNames extends AssetConnection {
+  src_hostname: string | null;
+  src_ip: string;
+  dst_hostname: string | null;
+  dst_ip: string;
+}
+
+/** One row of get_reachable_assets() (recursive CTE). */
+export interface ReachableAsset {
+  asset_id: number;
+  hostname: string | null;
+  internal_ip: string;
+  criticality: number;
+  department: string | null;
+  hops: number;
+  path: string;
+}
+
+/** GROUP BY attacker_ip ... HAVING */
+export interface TopAttacker {
+  attacker_ip: string;
+  total_attempts: number;
+  failed_attempts: number;
+  targets_hit: number;
+  last_seen: Date;
+}
+
+/** GROUP BY department */
+export interface DepartmentIncidentStats {
+  department: string;
+  total_incidents: number;
+  active_incidents: number;
+  resolved_incidents: number;
+  avg_blast_radius: number;
+}
+
+/** Correlated subquery: pairs above their target's average */
+export interface AboveAverageAttacker {
+  attacker_ip: string;
+  target_id: number;
+  target_hostname: string | null;
+  failed_attempts: number;
+  target_avg_failed: number;
+}
+
+export interface SecurityAnalytics {
+  top_attackers: TopAttacker[];
+  incidents_by_department: DepartmentIncidentStats[];
+  above_average_attackers: AboveAverageAttacker[];
+}
