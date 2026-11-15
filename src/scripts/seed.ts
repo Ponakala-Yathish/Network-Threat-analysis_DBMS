@@ -3,6 +3,7 @@
 // Run with: npx tsx src/scripts/seed.ts
 
 import 'dotenv/config';
+import './use-owner-connection';
 import { transaction, closePool } from '../lib/db';
 import { hashPassword } from '../lib/password';
 
@@ -122,7 +123,86 @@ async function seedDatabase() {
         )
         ON CONFLICT (title) DO NOTHING
       `);
-      
+
+      // Network topology: "src can reach dst". Looked up by IP so it works
+      // whatever asset_ids the rows above were given.
+      console.log('  🔗 Seeding asset connections...');
+      await client.query(`
+        INSERT INTO Asset_Connections (src_asset_id, dst_asset_id, connection_type)
+        SELECT s.asset_id, d.asset_id, e.kind
+        FROM (VALUES
+          ('10.0.1.10', '10.0.1.20', 'network'),     -- web-01 -> app-01
+          ('10.0.1.11', '10.0.1.21', 'network'),     -- web-02 -> app-02
+          ('10.0.1.20', '10.0.1.30', 'database'),    -- app-01 -> db-primary
+          ('10.0.1.21', '10.0.1.30', 'database'),    -- app-02 -> db-primary
+          ('10.0.1.20', '10.0.2.10', 'file-share'),  -- app-01 -> file-server
+          ('10.0.1.30', '10.0.1.31', 'replication'), -- db-primary -> db-replica
+          ('10.0.1.30', '10.0.2.20', 'network'),     -- db-primary -> backup-server
+          ('10.0.3.10', '10.0.3.11', 'replication'), -- dc-primary -> dc-secondary
+          ('10.0.3.11', '10.0.3.10', 'replication'), -- dc-secondary -> dc-primary (cycle)
+          ('10.0.3.10', '10.0.1.20', 'admin'),       -- dc-primary -> app-01
+          ('10.0.3.10', '10.0.2.10', 'admin'),       -- dc-primary -> file-server
+          ('10.0.4.10', '10.0.2.10', 'file-share'),  -- workstation-hr -> file-server
+          ('10.0.4.11', '10.0.1.20', 'network'),     -- workstation-finance -> app-01
+          ('10.0.4.12', '10.0.1.21', 'network'),     -- workstation-engineering -> app-02
+          ('10.0.4.12', '10.0.3.10', 'admin'),       -- workstation-engineering -> dc-primary
+          ('10.0.4.13', '10.0.2.10', 'file-share'),  -- workstation-sales -> file-server
+          ('10.0.4.14', '10.0.2.10', 'file-share')   -- workstation-marketing -> file-server
+        ) AS e(src_ip, dst_ip, kind)
+        JOIN Network_Assets s ON s.internal_ip = e.src_ip::inet
+        JOIN Network_Assets d ON d.internal_ip = e.dst_ip::inet
+        ON CONFLICT (src_asset_id, dst_asset_id) DO NOTHING
+      `);
+
+      // Sample traffic, only on an empty table so re-running the seed does not
+      // pile up duplicates. Includes two brute-force bursts (the trigger turns
+      // each into an incident) and some 40-day-old logs for archive_old_logs.
+      const { rows: [{ n }] } = await client.query<{ n: number }>('SELECT COUNT(*)::int AS n FROM Traffic_Logs');
+      if (n === 0) {
+        console.log('  📡 Seeding sample traffic logs...');
+        await client.query(`SELECT setseed(0.42)`); // same "random" data every time
+        await client.query(`
+          -- normal traffic over the last 2 days
+          INSERT INTO Traffic_Logs (attacker_ip, target_id, status, protocol, port, bytes_transferred, timestamp)
+          SELECT
+            ('198.18.' || (g % 6) || '.' || (10 + g % 40))::inet,
+            (SELECT asset_id FROM Network_Assets ORDER BY asset_id OFFSET (g % 15) LIMIT 1),
+            CASE WHEN random() < 0.8 THEN 'Allowed' ELSE 'Blocked' END,
+            (ARRAY['TCP', 'UDP', 'HTTPS', 'SSH'])[1 + g % 4],
+            (ARRAY[443, 53, 443, 22])[1 + g % 4],
+            (random() * 50000)::bigint,
+            NOW() - (random() * INTERVAL '2 days')
+          FROM generate_series(1, 120) AS g;
+
+          -- slow, low-volume probing: failures spread over hours (below the trigger threshold)
+          INSERT INTO Traffic_Logs (attacker_ip, target_id, status, protocol, port, timestamp)
+          SELECT '45.33.12.8', na.asset_id, 'Failed', 'SSH', 22, NOW() - g * INTERVAL '2 hours'
+          FROM generate_series(1, 3) AS g
+          JOIN Network_Assets na ON na.internal_ip = '10.0.3.10';
+
+          -- old logs, ready to be archived with CALL archive_old_logs(30, NULL)
+          INSERT INTO Traffic_Logs (attacker_ip, target_id, status, protocol, port, bytes_transferred, timestamp)
+          SELECT ('198.18.9.' || g)::inet, na.asset_id, 'Allowed', 'HTTPS', 443, 1200, NOW() - INTERVAL '40 days' - g * INTERVAL '1 hour'
+          FROM generate_series(1, 15) AS g
+          JOIN Network_Assets na ON na.internal_ip = '10.0.1.10';
+        `);
+        // Brute-force bursts, one row at a time like a real log feed.
+        const bursts: [string, string, number][] = [
+          ['203.0.113.45', '10.0.1.30', 7], // -> db-primary
+          ['198.51.100.23', '10.0.1.10', 6], // -> web-server-01
+        ];
+        for (const [attacker, targetIp, count] of bursts) {
+          for (let i = count; i >= 1; i--) {
+            await client.query(
+              `INSERT INTO Traffic_Logs (attacker_ip, target_id, status, protocol, port, timestamp)
+               SELECT $1::inet, asset_id, 'Failed', 'SSH', 22, NOW() - $3 * INTERVAL '20 seconds'
+               FROM Network_Assets WHERE internal_ip = $2::inet`,
+              [attacker, targetIp, i]
+            );
+          }
+        }
+      }
+
       console.log('  ✅ Seed data inserted successfully');
     });
     
