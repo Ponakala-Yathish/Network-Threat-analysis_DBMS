@@ -1,5 +1,5 @@
 import { query } from '@/lib/db';
-import { embeddingToPgVector } from '@/lib/embeddings';
+import { embedText, embeddingToPgVector, playbookEmbeddingText } from '@/lib/embeddings';
 import type {
   User,
   NetworkAsset,
@@ -12,6 +12,12 @@ import type {
   PlaybookSummary,
   SystemStats,
   PaginatedResponse,
+  AssetConnectionWithNames,
+  ReachableAsset,
+  SecurityAnalytics,
+  TopAttacker,
+  DepartmentIncidentStats,
+  AboveAverageAttacker,
 } from '@/types/database';
 
 // ============================================
@@ -96,7 +102,7 @@ export async function createUser(
 }
 
 export async function getAllUsers(): Promise<Omit<User, 'password_hash'>[]> {
-  const result = await query(
+  const result = await query<Omit<User, 'password_hash'>>(
     'SELECT user_id, username, role, created_at FROM Users ORDER BY created_at DESC, user_id DESC'
   );
   return result.rows;
@@ -142,6 +148,73 @@ export async function createAsset(data: {
 
 export async function updateAssetCriticality(assetId: number, newCriticality: number): Promise<void> {
   await query('UPDATE Network_Assets SET criticality = $1 WHERE asset_id = $2', [newCriticality, assetId]);
+}
+
+/** Partial update: only the fields that were sent are changed. */
+export async function updateAsset(
+  assetId: number,
+  data: { hostname?: string | null; criticality?: number; department?: string | null }
+): Promise<NetworkAsset | null> {
+  const result = await query<NetworkAsset>(
+    `UPDATE Network_Assets
+     SET hostname    = CASE WHEN $2 THEN $3 ELSE hostname END,
+         criticality = COALESCE($4, criticality),
+         department  = CASE WHEN $5 THEN $6 ELSE department END
+     WHERE asset_id = $1
+     RETURNING *`,
+    [
+      assetId,
+      data.hostname !== undefined, data.hostname || null,
+      data.criticality ?? null,
+      data.department !== undefined, data.department || null,
+    ]
+  );
+  return result.rows[0] || null;
+}
+
+/** Fails with 23503 (-> 409) while traffic logs or incidents still reference the asset. */
+export async function deleteAsset(assetId: number): Promise<boolean> {
+  const result = await query('DELETE FROM Network_Assets WHERE asset_id = $1', [assetId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+// ============================================
+// ASSET CONNECTIONS (topology) + RECURSIVE QUERY
+// ============================================
+export async function getAssetConnections(): Promise<AssetConnectionWithNames[]> {
+  const result = await query<AssetConnectionWithNames>(
+    `SELECT c.*,
+            s.hostname AS src_hostname, s.internal_ip AS src_ip,
+            d.hostname AS dst_hostname, d.internal_ip AS dst_ip
+     FROM Asset_Connections c
+     JOIN Network_Assets s ON s.asset_id = c.src_asset_id
+     JOIN Network_Assets d ON d.asset_id = c.dst_asset_id
+     ORDER BY s.hostname, d.hostname`
+  );
+  return result.rows;
+}
+
+export async function createAssetConnection(srcId: number, dstId: number, type: string) {
+  const result = await query(
+    `INSERT INTO Asset_Connections (src_asset_id, dst_asset_id, connection_type)
+     VALUES ($1, $2, $3) RETURNING *`,
+    [srcId, dstId, type]
+  );
+  return result.rows[0];
+}
+
+export async function deleteAssetConnection(srcId: number, dstId: number): Promise<boolean> {
+  const result = await query(
+    'DELETE FROM Asset_Connections WHERE src_asset_id = $1 AND dst_asset_id = $2',
+    [srcId, dstId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** WITH RECURSIVE: every asset reachable from `assetId` (see get_reachable_assets in schema.sql). */
+export async function getReachableAssets(assetId: number, maxHops = 5): Promise<ReachableAsset[]> {
+  const result = await query<ReachableAsset>('SELECT * FROM get_reachable_assets($1, $2)', [assetId, maxHops]);
+  return result.rows;
 }
 
 // ============================================
@@ -214,6 +287,12 @@ export async function getTrafficLogsByAttackerIp(attackerIp: string, limit = 50)
     [attackerIp, limit]
   );
   return result.rows;
+}
+
+/** Stored PROCEDURE, run with CALL. Moves old logs into Traffic_Logs_Archive. */
+export async function archiveOldTrafficLogs(olderThanDays: number): Promise<number> {
+  const result = await query<{ p_archived: number }>('CALL archive_old_logs($1::int, NULL)', [olderThanDays]);
+  return result.rows[0]?.p_archived ?? 0;
 }
 
 export async function deleteOldTrafficLogs(olderThanDays: number): Promise<number> {
@@ -368,6 +447,70 @@ export async function getAllPlaybooks(): Promise<PlaybookSummary[]> {
   return result.rows;
 }
 
+export async function getPlaybookById(playbookId: number): Promise<PlaybookSummary | null> {
+  const result = await query<PlaybookSummary>(
+    `SELECT ${PLAYBOOK_COLUMNS} FROM Security_Playbooks WHERE playbook_id = $1`,
+    [playbookId]
+  );
+  return result.rows[0] || null;
+}
+
+/** Free-text similarity search: embed the text, then nearest neighbours by cosine distance. */
+export async function searchPlaybooksByText(text: string, limit = 5): Promise<PlaybookSearchResult[]> {
+  return searchPlaybooksByVector(embedText(text), limit);
+}
+
+export interface PlaybookInput {
+  title: string;
+  threat_category?: string | null;
+  description: string;
+  mitigation: string;
+  tags?: string[] | null;
+}
+
+/** CREATE: the vector is computed here and stored with the row (duplicate title -> 23505 -> 409). */
+export async function createPlaybook(data: PlaybookInput): Promise<PlaybookSummary> {
+  const vector = embeddingToPgVector(embedText(playbookEmbeddingText(data)));
+  const result = await query<PlaybookSummary>(
+    `INSERT INTO Security_Playbooks (title, threat_category, description, mitigation, tags, vector)
+     VALUES ($1, $2, $3, $4, $5, $6::vector)
+     RETURNING ${PLAYBOOK_COLUMNS}`,
+    [data.title, data.threat_category || null, data.description, data.mitigation, data.tags ?? null, vector]
+  );
+  return result.rows[0];
+}
+
+/**
+ * UPDATE: the text changed, so the stored vector is stale. Merge the new
+ * fields over the current row and RE-EMBED, written in one statement.
+ */
+export async function updatePlaybook(playbookId: number, data: Partial<PlaybookInput>): Promise<PlaybookSummary | null> {
+  const current = await getPlaybookById(playbookId);
+  if (!current) return null;
+  const merged: PlaybookInput = {
+    title: data.title ?? current.title,
+    threat_category: data.threat_category !== undefined ? data.threat_category : current.threat_category,
+    description: data.description ?? current.description,
+    mitigation: data.mitigation ?? current.mitigation,
+    tags: data.tags !== undefined ? data.tags : current.tags,
+  };
+  const vector = embeddingToPgVector(embedText(playbookEmbeddingText(merged)));
+  const result = await query<PlaybookSummary>(
+    `UPDATE Security_Playbooks
+     SET title = $2, threat_category = $3, description = $4, mitigation = $5, tags = $6, vector = $7::vector
+     WHERE playbook_id = $1
+     RETURNING ${PLAYBOOK_COLUMNS}`,
+    [playbookId, merged.title, merged.threat_category || null, merged.description, merged.mitigation, merged.tags ?? null, vector]
+  );
+  return result.rows[0] || null;
+}
+
+/** DELETE: the row and its vector go together (the HNSW index updates itself). */
+export async function deletePlaybook(playbookId: number): Promise<boolean> {
+  const result = await query('DELETE FROM Security_Playbooks WHERE playbook_id = $1', [playbookId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
 // ============================================
 // BLAST RADIUS
 // ============================================
@@ -410,4 +553,68 @@ async function loadSystemStats(): Promise<SystemStats> {
   const value = result.rows[0];
   statsCache = { at: Date.now(), value };
   return value;
+}
+
+// ============================================
+// SECURITY ANALYTICS
+//   GROUP BY / HAVING, and a CORRELATED subquery.
+// ============================================
+export async function getSecurityAnalytics(): Promise<SecurityAnalytics> {
+  const [topAttackers, byDepartment, aboveAverage] = await Promise.all([
+    // GROUP BY + HAVING: sources with at least 3 failed attempts
+    query<TopAttacker>(
+      `SELECT tl.attacker_ip,
+              COUNT(*)                                     AS total_attempts,
+              COUNT(*) FILTER (WHERE tl.status = 'Failed') AS failed_attempts,
+              COUNT(DISTINCT tl.target_id)                 AS targets_hit,
+              MAX(tl.timestamp)                            AS last_seen
+       FROM Traffic_Logs tl
+       GROUP BY tl.attacker_ip
+       HAVING COUNT(*) FILTER (WHERE tl.status = 'Failed') >= 3
+       ORDER BY failed_attempts DESC, total_attempts DESC
+       LIMIT 10`
+    ),
+    // JOIN + GROUP BY: incident load per department
+    query<DepartmentIncidentStats>(
+      `SELECT COALESCE(na.department, 'Unassigned')         AS department,
+              COUNT(*)                                      AS total_incidents,
+              COUNT(*) FILTER (WHERE i.status = 'Active')   AS active_incidents,
+              COUNT(*) FILTER (WHERE i.status = 'Resolved') AS resolved_incidents,
+              ROUND(AVG(i.blast_radius_score)::numeric, 1)  AS avg_blast_radius
+       FROM Incidents i
+       JOIN Network_Assets na ON na.asset_id = i.target_id
+       GROUP BY COALESCE(na.department, 'Unassigned')
+       ORDER BY total_incidents DESC, department`
+    ),
+    // CORRELATED subquery: the inner SELECT refers to the outer row's
+    // p.target_id, so it is evaluated once per outer row: "who attacked this
+    // target at least as hard as the average attacker of THIS target?"
+    query<AboveAverageAttacker>(
+      `WITH per_pair AS (
+         SELECT attacker_ip, target_id, COUNT(*) AS failed_attempts
+         FROM Traffic_Logs
+         WHERE status = 'Failed'
+         GROUP BY attacker_ip, target_id
+       )
+       SELECT p.attacker_ip,
+              p.target_id,
+              na.hostname AS target_hostname,
+              p.failed_attempts,
+              (SELECT ROUND(AVG(p2.failed_attempts)::numeric, 2)
+                 FROM per_pair p2
+                WHERE p2.target_id = p.target_id) AS target_avg_failed
+       FROM per_pair p
+       JOIN Network_Assets na ON na.asset_id = p.target_id
+       WHERE p.failed_attempts >= (SELECT AVG(p2.failed_attempts)
+                                     FROM per_pair p2
+                                    WHERE p2.target_id = p.target_id)
+       ORDER BY p.failed_attempts DESC
+       LIMIT 10`
+    ),
+  ]);
+  return {
+    top_attackers: topAttackers.rows,
+    incidents_by_department: byDepartment.rows,
+    above_average_attackers: aboveAverage.rows,
+  };
 }

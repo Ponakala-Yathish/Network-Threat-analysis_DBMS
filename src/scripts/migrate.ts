@@ -9,6 +9,7 @@
 // transaction: it either applies completely or not at all.
 
 import 'dotenv/config';
+import './use-owner-connection';
 import fs from 'fs';
 import path from 'path';
 import pool, { closePool } from '../lib/db';
@@ -26,6 +27,22 @@ async function runMigration() {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_ID]);
     await client.query(schema);
+
+    // schema.sql creates the threat_app login role without a password (a
+    // password must not live in a committed SQL file). Set it from .env.
+    // format(%L) quotes it safely as a literal; DDL cannot take $1 parameters.
+    const appPassword = process.env.APP_DATABASE_PASSWORD;
+    if (appPassword) {
+      const { rows } = await client.query<{ sql: string }>(
+        `SELECT format('ALTER ROLE threat_app WITH LOGIN PASSWORD %L', $1::text) AS sql`,
+        [appPassword]
+      );
+      await client.query(rows[0].sql);
+      console.log('🔐 Password set for database login role threat_app');
+    } else {
+      console.warn('⚠ APP_DATABASE_PASSWORD is not set: threat_app has no password and the app cannot log in as it.');
+    }
+
     await client.query('COMMIT');
     console.log('✅ Migration completed successfully!');
   } catch (error) {
