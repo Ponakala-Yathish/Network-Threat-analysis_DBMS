@@ -44,8 +44,8 @@ function LoginForm() {
       const target = redirect.startsWith(rolePrefix) && !redirect.startsWith('//') ? redirect : roleHome;
       router.replace(target);
       router.refresh();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
       setLoading(false);
     }

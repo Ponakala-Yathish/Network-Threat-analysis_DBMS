@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { format } from 'date-fns';
-import { Search, Filter, RefreshCw, AlertTriangle, Plus } from 'lucide-react';
+import { RefreshCw, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
@@ -126,8 +126,8 @@ export default function TrafficLogsPage() {
       setFormData({ attackerIp: '', targetId: '', status: 'Failed', protocol: '', port: '', bytesTransferred: 0 });
       setFormErrors({});
       fetchData();
-    } catch (err: any) {
-      setFormErrors({ submit: err.message });
+    } catch (err) {
+      setFormErrors({ submit: err instanceof Error ? err.message : 'Something went wrong' });
     } finally {
       setCreating(false);
     }
@@ -359,7 +359,7 @@ export default function TrafficLogsPage() {
                 { value: 'Failed', label: 'Failed (triggers incident detection)' },
               ]}
               value={formData.status}
-              onChange={(e) => setFormData(prev => ({ ...prev, status: e.target.value as any }))}
+              onChange={(e) => setFormData(prev => ({ ...prev, status: e.target.value as 'Allowed' | 'Blocked' | 'Failed' }))}
               error={formErrors.status}
             />
             <Input

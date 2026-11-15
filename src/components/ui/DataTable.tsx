@@ -5,20 +5,18 @@ import { clsx } from 'clsx';
 import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Search, Filter } from 'lucide-react';
 import { Button } from './Button';
 import { Input } from './Input';
-import { Select } from './Select';
 
 export interface Column<T> {
   id: string;
-  header: string | ((ctx: {}) => React.ReactNode);
+  header: string | (() => React.ReactNode);
   accessorKey?: keyof T;
-  accessorFn?: (row: T) => any;
-  cell?: (ctx: { row: { original: T; getValue: (key: string) => any } }) => React.ReactNode;
+  accessorFn?: (row: T) => unknown;
+  cell?: (ctx: { row: { original: T; getValue: <K extends keyof T>(key: K) => T[K] } }) => React.ReactNode;
   size?: number;
   enableSorting?: boolean;
 }
 
 export type SortingState = Array<{ id: string; desc: boolean }>;
-export type ColumnFiltersState = Array<{ id: string; value: unknown }>;
 export type PaginationState = { pageIndex: number; pageSize: number };
 
 export interface DataTableProps<T> {
@@ -26,6 +24,7 @@ export interface DataTableProps<T> {
   columns: Column<T>[];
   /** When provided, the table is SERVER-paginated: `data` is already the current page. */
   totalCount?: number;
+  /** Accepted for API compatibility; the page count is derived from totalCount. */
   pageCount?: number;
   /** Controlled 1-based page and page size (keep these in the parent for server paging). */
   page?: number;
@@ -34,34 +33,34 @@ export interface DataTableProps<T> {
   isLoading?: boolean;
   onPageChange?: (page: number) => void;
   onSortChange?: (sorting: SortingState) => void;
-  onFilterChange?: (filters: ColumnFiltersState) => void;
-  onSearch?: (query: string) => void;
   searchPlaceholder?: string;
   showSearch?: boolean;
   showPagination?: boolean;
   pageSizeOptions?: number[];
 }
 
+/** Reads one column's value from a row, whether it's a plain key or a computed accessor. */
+function valueOf<T>(row: T, col: Column<T>): unknown {
+  return col.accessorKey ? row[col.accessorKey] : col.accessorFn?.(row);
+}
+
 export function DataTable<T>({
   data,
   columns,
   totalCount,
-  pageCount,
   page: pageProp,
   pageSize: pageSizeProp,
   onPageSizeChange,
   isLoading = false,
   onPageChange,
   onSortChange,
-  onFilterChange,
-  onSearch,
   searchPlaceholder = 'Search...',
   showSearch = true,
   showPagination = true,
   pageSizeOptions = [10, 20, 50, 100],
 }: DataTableProps<T>) {
+
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
@@ -75,8 +74,8 @@ export function DataTable<T>({
         const col = columns.find(c => c.accessorKey === sort.id || c.id === sort.id);
         if (!col) continue;
 
-        const aVal = col.accessorKey ? (a as any)[col.accessorKey] : col.accessorFn?.(a);
-        const bVal = col.accessorKey ? (b as any)[col.accessorKey] : col.accessorFn?.(b);
+        const aVal = valueOf(a, col) as string | number | null | undefined;
+        const bVal = valueOf(b, col) as string | number | null | undefined;
 
         if (aVal === bVal) continue;
         if (aVal === null || aVal === undefined) return sort.desc ? -1 : 1;
@@ -94,7 +93,7 @@ export function DataTable<T>({
     const search = globalFilter.toLowerCase();
     return sortedData.filter(row => {
       return columns.some(col => {
-        const val = col.accessorKey ? (row as any)[col.accessorKey] : col.accessorFn?.(row);
+        const val = valueOf(row, col);
         return String(val || '').toLowerCase().includes(search);
       });
     });
@@ -173,7 +172,7 @@ export function DataTable<T>({
                   style={{ width: column.size }}
                 >
                   <div className="flex items-center gap-1">
-                    {typeof column.header === 'function' ? column.header({}) : column.header}
+                    {typeof column.header === 'function' ? column.header() : column.header}
                     {column.enableSorting && sorting.find(s => s.id === column.id) ? (
                       sorting.find(s => s.id === column.id)?.desc ? (
                         <ChevronDown className="h-4 w-4 text-blue-600" />
@@ -210,7 +209,7 @@ export function DataTable<T>({
             ) : (
               paginatedData.map((row, rowIndex) => (
                 <tr
-                  key={(row as any).id || rowIndex}
+                  key={rowIndex}
                   className={clsx(
                     'hover:bg-gray-50 transition-colors',
                     rowIndex % 2 === 1 && 'bg-gray-50/50'
@@ -221,8 +220,8 @@ export function DataTable<T>({
                       key={column.id}
                       className="px-4 py-3 text-gray-900"
                     >
-                      {column.cell ? column.cell({ row: { original: row, getValue: (key: string) => (row as any)[key] } }) :
-                       column.accessorKey ? String((row as any)[column.accessorKey] ?? '') : '-'}
+                      {column.cell ? column.cell({ row: { original: row, getValue: (key) => row[key] } }) :
+                       column.accessorKey ? String(row[column.accessorKey] ?? '') : '-'}
                     </td>
                   ))}
                 </tr>

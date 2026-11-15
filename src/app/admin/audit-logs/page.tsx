@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { format } from 'date-fns';
-import { Download, Filter } from 'lucide-react';
+import { Download } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
