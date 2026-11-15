@@ -9,13 +9,24 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { Modal, ConfirmModal } from '@/components/ui/Modal';
 import { Badge } from '@/components/ui/Badge';
-import { Card, CardHeader, CardTitle, CardContent, CardFooter } from '@/components/ui/Card';
 
 interface UserRow {
   user_id: number;
   username: string;
   role: 'Admin' | 'Analyst';
   created_at: string;
+}
+
+/** Fetches the user list; returns null (and logs) on failure. Touches no React state. */
+async function requestUsers(): Promise<UserRow[] | null> {
+  try {
+    const res = await fetch('/api/admin/users');
+    const result = await res.json();
+    return res.ok ? result : null;
+  } catch (error) {
+    console.error('Failed to fetch users:', error);
+    return null;
+  }
 }
 
 export default function UsersPage() {
@@ -32,23 +43,26 @@ export default function UsersPage() {
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
+  // Reload after a create/edit/delete.
   const fetchUsers = async () => {
     setLoading(true);
-    try {
-      const res = await fetch('/api/admin/users');
-      const result = await res.json();
-      if (res.ok) {
-        setData(result);
-      }
-    } catch (error) {
-      console.error('Failed to fetch users:', error);
-    } finally {
-      setLoading(false);
-    }
+    const rows = await requestUsers();
+    if (rows) setData(rows);
+    setLoading(false);
   };
 
+  // Initial load. `loading` already starts as true; state is only set once the
+  // request settles, and not at all if the page unmounted first.
   useEffect(() => {
-    fetchUsers();
+    let cancelled = false;
+    requestUsers().then((rows) => {
+      if (cancelled) return;
+      if (rows) setData(rows);
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const validateForm = () => {
@@ -87,8 +101,8 @@ export default function UsersPage() {
 
       setModalOpen(false);
       fetchUsers();
-    } catch (error: any) {
-      setFormErrors({ submit: error.message });
+    } catch (error) {
+      setFormErrors({ submit: error instanceof Error ? error.message : 'Something went wrong' });
     } finally {
       setSubmitting(false);
     }
@@ -109,8 +123,8 @@ export default function UsersPage() {
 
       setDeleteConfirm(null);
       fetchUsers();
-    } catch (error: any) {
-      alert(error.message);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Something went wrong');
     }
   };
 

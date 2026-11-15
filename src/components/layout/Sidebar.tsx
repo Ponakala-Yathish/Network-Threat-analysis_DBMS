@@ -7,13 +7,14 @@ import {
   LayoutDashboard,
   ShieldAlert,
   Activity,
-  Database,
   Users,
   History,
   LogOut,
   Menu,
   X,
   ChevronLeft,
+  Server,
+  BookOpen,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -26,6 +27,8 @@ interface NavItem {
 
 const adminNavItems: NavItem[] = [
   { href: '/admin/dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['Admin'] },
+  { href: '/admin/assets', label: 'Network Assets', icon: Server, roles: ['Admin'] },
+  { href: '/admin/playbooks', label: 'Playbooks', icon: BookOpen, roles: ['Admin'] },
   { href: '/admin/audit-logs', label: 'Audit Logs', icon: History, roles: ['Admin'] },
   { href: '/admin/users', label: 'Users', icon: Users, roles: ['Admin'] },
 ];
@@ -33,6 +36,7 @@ const adminNavItems: NavItem[] = [
 const analystNavItems: NavItem[] = [
   { href: '/analyst/incidents', label: 'Incidents', icon: ShieldAlert, roles: ['Analyst'] },
   { href: '/analyst/traffic-logs', label: 'Traffic Logs', icon: Activity, roles: ['Analyst'] },
+  { href: '/analyst/playbooks', label: 'Playbooks', icon: BookOpen, roles: ['Analyst'] },
 ];
 
 interface SidebarProps {
